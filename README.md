@@ -10,6 +10,7 @@ Generate audio podcasts automatically using OpenAI's APIs for text generation an
 - 🎭 Various voice options
 - ⏱️ Flexible duration settings
 - 📝 Pure narrative text optimized for audio
+- 📄 Support for custom text files
 
 ## Prerequisites
 
@@ -38,12 +39,29 @@ export OPENAI_API_KEY='your-api-key-here'
 go run main.go
 ```
 
-Follow the interactive prompts to:
+The program offers two modes:
+
+### 1. Text Generation Mode
+Choose (G)enerate at the prompt and follow the interactive steps:
 1. Enter your podcast idea
 2. Choose a style
 3. Select duration
 4. Pick a voice
 5. Choose language
+
+### 2. Custom Text Mode
+Choose (F)ile at the prompt and:
+1. Provide the path to your text file
+2. Select duration
+3. Pick a voice
+4. Choose language
+
+## Text File Requirements
+When using a custom text file:
+- Plain text format (.txt recommended)
+- Content should be narrative-style text
+- Avoid special formatting or dialogue marks
+- Text should be appropriate for the selected duration
 
 ## Available Options
 
@@ -59,6 +77,7 @@ Multiple languages supported including French, English, Spanish, etc.
 ## Output
 
 The program generates:
+- A copy of the text content (`text.txt`)
 - A final MP3 file (`podcast_final.mp3`)
 
 ## Contributing
