@@ -11,16 +11,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // OpenAI API endpoints and models configuration
 const (
-	OpenAIChatEndpoint    = "https://api.openai.com/v1/chat/completions"
-	OpenAITTSEndpoint     = "https://api.openai.com/v1/audio/speech"
-	OpenAIModelGeneration = "o1-preview" // e.g. "o1-2024-12-17"
-	OpenAIModelTTS        = "tts-1-hd"   // changed to "tts-1-hd"
-	WPM                   = 178          // Words Per Minute for OpenAI voices
+	OpenAITTSEndpoint = "https://api.openai.com/v1/audio/speech"
+	OpenAIModelTTS    = "tts-1-hd" // changed to "tts-1-hd"
 )
 
 // Available options for podcast generation
@@ -39,17 +37,13 @@ var (
 	availableVoices = []string{
 		"alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer",
 	}
-	availableDurations = []string{"5", "10", "15", "20", "30"}
 )
 
 // PromptData holds all the user input for the podcast
 type PromptData struct {
-	Prompt   string
-	Style    string
-	Duration string
+	TextFile string
 	Voice    string
 	Language string
-	TextFile string // Nouveau champ pour le chemin du fichier
 }
 
 // Content represents a message content part
@@ -122,7 +116,7 @@ func checkAPIKey() error {
 }
 
 func main() {
-	fmt.Println("=== Podcast Generator CLI ===")
+	fmt.Println("=== Text-to-Speech Generator ===")
 
 	// Initial API key verification
 	fmt.Println("Checking OpenAI API key...")
@@ -132,57 +126,39 @@ func main() {
 	}
 	fmt.Println("✅ API key valid")
 
-	// 1. Collect user input
-	promptData := collectUserInput()
+	// Vérifier si un fichier a été passé en argument
+	var promptData PromptData
+	if len(os.Args) > 1 {
+		textFile := os.Args[1]
+		// Vérifier si le fichier existe
+		if _, err := os.Stat(textFile); os.IsNotExist(err) {
+			fmt.Printf("❌ File not found: %s\n", textFile)
+			os.Exit(1)
+		}
+		// Collecter uniquement les autres paramètres
+		promptData = collectUserInputWithFile(textFile)
+	} else {
+		// Collecter tous les paramètres via l'interface interactive
+		promptData = collectUserInput()
+	}
 
 	// 2. Recap the information
 	fmt.Println("\nRecap:")
-	fmt.Printf("  Prompt   : %s\n", promptData.Prompt)
-	fmt.Printf("  Style    : %s\n", promptData.Style)
-	fmt.Printf("  Duration : %s minutes\n", promptData.Duration)
+	fmt.Printf("  Text File : %s\n", promptData.TextFile)
 	fmt.Printf("  Voice    : %s\n", promptData.Voice)
 	fmt.Printf("  Language : %s\n", promptData.Language)
 
-	// 3. Generate or load text
-	var generatedText string
-	if promptData.TextFile != "" {
-		fmt.Println("\nLoading text from file...")
-		content, err := os.ReadFile(promptData.TextFile)
-		if err != nil {
-			fmt.Printf("\n❌ Error reading file: %v\n", err)
-			os.Exit(1)
-		}
-		generatedText = string(content)
-		fmt.Printf("✅ Text loaded (%d characters)\n", len(generatedText))
-	} else {
-		fmt.Println("\nGenerating text from OpenAI ...")
-		var done = make(chan bool)
-		defer close(done)
-		go showSpinner(done)
-		var err error
-		generatedText, err = generatePodcastText(promptData)
-		done <- true
-		if err != nil {
-			if pe, ok := err.(*PodcastError); ok {
-				fmt.Printf("\n❌ Error: %v\n", pe)
-			} else {
-				fmt.Printf("\n❌ Unexpected error: %v\n", err)
-			}
-			os.Exit(1)
-		}
-		fmt.Printf("✅ Text generation complete (%d characters)\n", len(generatedText))
-	}
-
-	// Save and verify text
-	fmt.Println("\nSaving text to file...")
-	err := saveGeneratedText(generatedText)
+	// 3. Load text from file
+	fmt.Println("\nLoading text from file...")
+	content, err := os.ReadFile(promptData.TextFile)
 	if err != nil {
-		fmt.Printf("\n❌ Error saving text: %v\n", err)
+		fmt.Printf("\n❌ Error reading file: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("✅ Text saved and verified")
+	generatedText := string(content)
+	fmt.Printf("✅ Text loaded (%d characters)\n", len(generatedText))
 
-	// 4. Split the generated text into chunks (<= 2800 chars)
+	// 4. Split the text into chunks (<= 2800 chars)
 	fmt.Println("\nSplitting text into chunks ...")
 	chunks := splitTextIntoChunks(generatedText, 2800)
 	fmt.Printf("Created %d chunk(s).\n", len(chunks))
@@ -195,29 +171,14 @@ func main() {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// 6. For each chunk, call TTS to get audio, save to file
-	fmt.Println("\nRequesting TTS for each chunk ...")
-	audioFiles := make([]string, 0, len(chunks))
-	for i, chunk := range chunks {
-		fmt.Printf("\n  - Generating audio for chunk %d/%d\n", i+1, len(chunks))
-		var done = make(chan bool)
-		defer close(done)
-		go showSpinner(done)
-		chunkFile := filepath.Join(tmpDir, fmt.Sprintf("chunk_%d.mp3", i+1))
-		err = generateTTSAudio(chunk, promptData.Voice, chunkFile)
-		done <- true
-		if err != nil {
-			if pe, ok := err.(*PodcastError); ok {
-				fmt.Printf("\n❌ Error: %v\n", pe)
-			} else {
-				fmt.Printf("\n❌ Error generating TTS for chunk %d: %v\n", i+1, err)
-			}
-			os.Exit(1)
-		}
-		audioFiles = append(audioFiles, chunkFile)
-		time.Sleep(time.Second) // simple rate-limit or to give feedback
+	// 6. Générer l'audio pour tous les chunks en parallèle
+	fmt.Println("\nGenerating audio for all chunks in parallel...")
+	audioFiles, err := generateTTSAudioParallel(chunks, promptData.Voice, tmpDir)
+	if err != nil {
+		fmt.Printf("\n❌ Error during audio generation: %v\n", err)
+		os.Exit(1)
 	}
-	fmt.Println("TTS generation complete.")
+	fmt.Println("\n✅ Audio generation complete.")
 
 	// 7. Concatenate all partial MP3 files
 	finalOutput := "podcast_final.mp3"
@@ -228,8 +189,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("Podcast generation complete!")
-	fmt.Printf("Your final podcast is saved as '%s'\n", finalOutput)
+	fmt.Println("✅ Audio assembly complete!")
+	fmt.Printf("Your final audio is saved as '%s'\n", finalOutput)
 }
 
 // getValidChoice displays options and gets a valid choice from user
@@ -254,311 +215,37 @@ func getValidChoice(reader *bufio.Reader, options []string, prompt string) strin
 func collectUserInput() PromptData {
 	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Println("\nDo you want to generate text or use an existing file? (G)enerate/(F)ile: ")
-	choice, _ := reader.ReadString('\n')
-	choice = strings.ToUpper(strings.TrimSpace(choice))
+	fmt.Print("Enter the path to your text file: ")
+	textFile, _ := reader.ReadString('\n')
+	textFile = strings.TrimSpace(textFile)
 
-	var prompt, style, textFile string
-
-	if choice == "F" {
-		fmt.Print("Enter the path to your text file: ")
-		textFile, _ = reader.ReadString('\n')
-		textFile = strings.TrimSpace(textFile)
-		// Vérifier si le fichier existe
-		if _, err := os.Stat(textFile); os.IsNotExist(err) {
-			fmt.Printf("❌ File not found: %s\n", textFile)
-			os.Exit(1)
-		}
-	} else {
-		fmt.Print("Enter your podcast idea (Prompt): ")
-		prompt, _ = reader.ReadString('\n')
-		prompt = strings.TrimSpace(prompt)
-
-		fmt.Println("\nSelect a style from the following options (Science fiction, Fantasy, Romance, etc.): ")
-		fmt.Print("> ")
-		style, _ = reader.ReadString('\n')
-		style = strings.TrimSpace(style)
+	// Vérifier si le fichier existe
+	if _, err := os.Stat(textFile); os.IsNotExist(err) {
+		fmt.Printf("❌ File not found: %s\n", textFile)
+		os.Exit(1)
 	}
 
-	duration := getValidChoice(reader, availableDurations, "durations (in minutes)")
 	voice := getValidChoice(reader, availableVoices, "voices")
 	language := getValidChoice(reader, availableLanguages, "languages")
 
 	return PromptData{
-		Prompt:   prompt,
-		Style:    style,
-		Duration: duration,
+		TextFile: textFile,
 		Voice:    voice,
 		Language: language,
+	}
+}
+
+// Nouvelle fonction pour collecter les entrées avec fichier prédéfini
+func collectUserInputWithFile(textFile string) PromptData {
+	reader := bufio.NewReader(os.Stdin)
+	voice := getValidChoice(reader, availableVoices, "voices")
+	language := getValidChoice(reader, availableLanguages, "languages")
+
+	return PromptData{
 		TextFile: textFile,
+		Voice:    voice,
+		Language: language,
 	}
-}
-
-// Map des traductions de "FIN" dans différentes langues
-var endWordByLanguage = map[string]string{
-	"French":     "FIN",
-	"English":    "THE END",
-	"Spanish":    "FIN",
-	"German":     "ENDE",
-	"Italian":    "FINE",
-	"Portuguese": "FIM",
-	// Par défaut "THE END" pour les autres langues
-}
-
-func getEndWord(language string) string {
-	if word, ok := endWordByLanguage[language]; ok {
-		return word
-	}
-	return "THE END"
-}
-
-func generatePodcastText(p PromptData) (string, error) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		return "", &PodcastError{
-			Stage:   "text generation",
-			Message: "API key not found",
-		}
-	}
-
-	// Fonction helper pour générer le texte
-	generateText := func(extraDuration float64) (string, error) {
-		adjustedDuration := float64(stringToInt(p.Duration)) + extraDuration
-		targetWords := int(adjustedDuration * WPM)
-
-		combinedPrompt := fmt.Sprintf(
-			`You are tasked with writing a %s story in %s that will be exactly %.1f minutes long when read by an AI voice.
-
-Story context: %s
-
-IMPORTANT LENGTH REQUIREMENTS:
-The story MUST be %d words long (based on AI voice reading speed of %d words per minute).
-This is not a suggestion but a strict requirement for proper audio timing.
-
-Writing guidelines:
-- Write a complete story that naturally fills the entire duration
-- Use rich, descriptive language that flows well when spoken
-- Avoid dialogue marks or special formatting
-- Create a clear narrative arc (beginning, middle, end)
-- Make the pacing consistent throughout
-- Focus on engaging, spoken-word storytelling
-- The story MUST end with the word "%s" on a new line after a pause
-
-Note: The word count is crucial for timing - aim for exactly %d words (including the ending word).`,
-			p.Style, p.Language, adjustedDuration,
-			p.Prompt,
-			targetWords, WPM,
-			getEndWord(p.Language),
-			targetWords,
-		)
-
-		// Nouvelle structure pour le contenu du message
-		type Content struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-
-		// Nouvelle structure pour le message
-		type Message struct {
-			Role    string    `json:"role"`
-			Content []Content `json:"content"`
-		}
-
-		payload := map[string]interface{}{
-			"model": OpenAIModelGeneration,
-			"messages": []Message{
-				{
-					Role: "user",
-					Content: []Content{
-						{
-							Type: "text",
-							Text: combinedPrompt,
-						},
-					},
-				},
-			},
-			"max_completion_tokens": 4000,
-		}
-
-		jsonData, err := json.Marshal(payload)
-		if err != nil {
-			return "", err
-		}
-
-		req, err := http.NewRequest("POST", OpenAIChatEndpoint, bytes.NewBuffer(jsonData))
-		if err != nil {
-			return "", err
-		}
-
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("Content-Type", "application/json")
-
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", err
-		}
-
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			fmt.Printf("\n🔍 OpenAI API Response:\n%s\n", string(body))
-			return "", &PodcastError{
-				Stage:   "text generation",
-				Message: fmt.Sprintf("API request failed (status %d)", resp.StatusCode),
-				Err:     fmt.Errorf(string(body)),
-			}
-		}
-
-		// Modified response structure to handle both string and array content
-		var responseData struct {
-			Choices []struct {
-				Message struct {
-					Content interface{} `json:"content"`
-				} `json:"message"`
-			} `json:"choices"`
-			Usage struct {
-				TotalTokens int `json:"total_tokens"`
-			} `json:"usage"`
-		}
-
-		err = json.NewDecoder(resp.Body).Decode(&responseData)
-		if err != nil {
-			return "", err
-		}
-
-		if len(responseData.Choices) == 0 {
-			return "", fmt.Errorf("no text returned by the model")
-		}
-
-		// Handle both string and array content types
-		var content string
-		switch v := responseData.Choices[0].Message.Content.(type) {
-		case string:
-			content = v
-		case []interface{}:
-			// Handle array of content objects
-			if len(v) > 0 {
-				if contentObj, ok := v[0].(map[string]interface{}); ok {
-					if text, ok := contentObj["text"].(string); ok {
-						content = text
-					}
-				}
-			}
-		default:
-			return "", fmt.Errorf("unexpected content format from API")
-		}
-
-		if content == "" {
-			return "", fmt.Errorf("no text content in response")
-		}
-
-		actualWords := countWords(content)
-		estimatedDuration := float64(actualWords) / WPM
-
-		fmt.Printf("\nGeneration stats:\n")
-		fmt.Printf("- Target words: %d\n", targetWords)
-		fmt.Printf("- Actual words: %d\n", actualWords)
-		fmt.Printf("- Target duration: %.1f minutes\n", adjustedDuration)
-		fmt.Printf("- Estimated duration: %.1f minutes\n", estimatedDuration)
-		fmt.Printf("- Total tokens: %d\n", responseData.Usage.TotalTokens)
-
-		// Après avoir reçu le contenu, s'assurer qu'il se termine bien par le mot approprié
-		endWord := getEndWord(p.Language)
-		if !strings.HasSuffix(strings.TrimSpace(content), endWord) {
-			content = strings.TrimSpace(content) + "\n\n" + endWord
-		}
-
-		return content, nil
-	}
-
-	// Première tentative
-	content, err := generateText(0)
-	if err != nil {
-		return "", err
-	}
-
-	// Vérification de la durée
-	actualWords := countWords(content)
-	estimatedDuration := float64(actualWords) / WPM
-	targetDuration := float64(stringToInt(p.Duration))
-
-	// Si la durée est trop courte (moins de 90% de la durée cible)
-	if estimatedDuration < targetDuration*0.9 {
-		fmt.Printf("\n⚠️  Generated content is too short (%.1f vs %s minutes)\n", estimatedDuration, p.Duration)
-		fmt.Println("🔄 Trying to extend the existing content...")
-
-		// Deuxième tentative en demandant d'allonger le texte existant
-		extensionPrompt := fmt.Sprintf(
-			`Here is a story that needs to be longer. Currently it's %.1f minutes long, but it needs to be %s minutes.
-Please extend this story while maintaining the same style and flow. Add more details, descriptions, and story elements.
-
-Current story:
-%s
-
-Make the story longer while keeping its coherence and quality. Target duration: %s minutes.`,
-			estimatedDuration, p.Duration, content, p.Duration,
-		)
-
-		payload := map[string]interface{}{
-			"model": OpenAIModelGeneration,
-			"messages": []Message{
-				{
-					Role: "user",
-					Content: []Content{
-						{
-							Type: "text",
-							Text: extensionPrompt,
-						},
-					},
-				},
-			},
-			"max_completion_tokens": 4000,
-		}
-
-		// Appel à l'API pour étendre le texte
-		jsonData, err := json.Marshal(payload)
-		if err == nil {
-			req, err := http.NewRequest("POST", OpenAIChatEndpoint, bytes.NewBuffer(jsonData))
-			if err == nil {
-				req.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
-				req.Header.Set("Content-Type", "application/json")
-
-				client := &http.Client{}
-				resp, err := client.Do(req)
-				if err == nil {
-					defer resp.Body.Close()
-
-					if resp.StatusCode == http.StatusOK {
-						var responseData struct {
-							Choices []struct {
-								Message struct {
-									Content []Content `json:"content"`
-								} `json:"message"`
-							} `json:"choices"`
-						}
-
-						if json.NewDecoder(resp.Body).Decode(&responseData) == nil &&
-							len(responseData.Choices) > 0 &&
-							len(responseData.Choices[0].Message.Content) > len(content) {
-							// Utiliser le nouveau contenu seulement s'il est plus long
-							content = responseData.Choices[0].Message.Content[0].Text
-							fmt.Printf("✅ Successfully extended the content to %d words\n",
-								countWords(content))
-						}
-					}
-				}
-			}
-		}
-
-		// Si quelque chose a échoué, on garde le contenu original
-		if countWords(content) == actualWords {
-			fmt.Println("⚠️  Extension failed, keeping original content")
-		}
-	}
-
-	return content, nil
 }
 
 // Improved chunk splitting to avoid losing text
@@ -799,4 +486,78 @@ func saveGeneratedText(text string) error {
 	}
 
 	return nil
+}
+
+// generateTTSAudioParallel gère la génération audio en parallèle
+func generateTTSAudioParallel(chunks []string, voice string, tmpDir string) ([]string, error) {
+	audioFiles := make([]string, len(chunks))
+	errors := make(chan error, len(chunks))
+	progress := make(chan int, len(chunks))
+	var wg sync.WaitGroup
+
+	// Limiter le nombre de goroutines concurrentes
+	semaphore := make(chan struct{}, 5)
+
+	// Démarrer la goroutine d'affichage de la progression
+	progressDone := make(chan bool)
+	go func() {
+		completed := 0
+		total := len(chunks)
+		for range progress {
+			completed++
+			// Effacer la ligne précédente
+			fmt.Printf("\r\033[K")
+			// Afficher la barre de progression
+			fmt.Printf("Progress: [")
+			width := 30
+			pos := width * completed / total
+			for i := 0; i < width; i++ {
+				if i < pos {
+					fmt.Print("=")
+				} else if i == pos {
+					fmt.Print(">")
+				} else {
+					fmt.Print(" ")
+				}
+			}
+			fmt.Printf("] %d/%d chunks complete", completed, total)
+		}
+		progressDone <- true
+	}()
+
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(index int, text string) {
+			defer wg.Done()
+
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			chunkFile := filepath.Join(tmpDir, fmt.Sprintf("chunk_%d.mp3", index+1))
+			err := generateTTSAudio(text, voice, chunkFile)
+			if err != nil {
+				errors <- fmt.Errorf("chunk %d: %w", index+1, err)
+				return
+			}
+			audioFiles[index] = chunkFile
+			progress <- 1 // Signaler qu'un chunk est terminé
+		}(i, chunk)
+	}
+
+	// Attendre que toutes les goroutines soient terminées
+	wg.Wait()
+	close(errors)
+	close(progress)
+
+	// Attendre que l'affichage de la progression soit terminé
+	<-progressDone
+
+	// Vérifier s'il y a eu des erreurs
+	for err := range errors {
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return audioFiles, nil
 }

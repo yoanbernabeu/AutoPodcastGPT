@@ -1,16 +1,14 @@
-# AutoPodcastGPT 🎙️
+# Text-to-Speech Generator 🎙️
 
-Generate audio podcasts automatically using OpenAI's APIs for text generation and text-to-speech conversion.
+Convert text files into high-quality audio using OpenAI's text-to-speech API.
 
 ## Features
 
-- 🤖 Uses OpenAI's latest models for text generation
 - 🗣️ High-quality text-to-speech conversion
 - 🌍 Supports multiple languages
 - 🎭 Various voice options
-- ⏱️ Flexible duration settings
-- 📝 Pure narrative text optimized for audio
-- 📄 Support for custom text files
+- 📄 Support for text files
+- 🔄 Automatic text chunking for optimal processing
 
 ## Prerequisites
 
@@ -20,8 +18,8 @@ Generate audio podcasts automatically using OpenAI's APIs for text generation an
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/AutoPodcastGPT.git
-cd AutoPodcastGPT
+git clone https://github.com/yourusername/text-to-speech-generator.git
+cd text-to-speech-generator
 go mod tidy
 ```
 
@@ -35,50 +33,44 @@ export OPENAI_API_KEY='your-api-key-here'
 
 ## Usage
 
+There are two ways to use the program:
+
+### 1. Interactive Mode
 ```bash
 go run main.go
 ```
 
-The program offers two modes:
+### 2. File Argument Mode
+```bash
+go run main.go path/to/your/text/file.txt
+```
 
-### 1. Text Generation Mode
-Choose (G)enerate at the prompt and follow the interactive steps:
-1. Enter your podcast idea
-2. Choose a style
-3. Select duration
-4. Pick a voice
-5. Choose language
-
-### 2. Custom Text Mode
-Choose (F)ile at the prompt and:
-1. Provide the path to your text file
-2. Select duration
-3. Pick a voice
-4. Choose language
+In both cases, you will then need to select:
+1. A voice
+2. A language
 
 ## Text File Requirements
-When using a custom text file:
 - Plain text format (.txt recommended)
 - Content should be narrative-style text
 - Avoid special formatting or dialogue marks
-- Text should be appropriate for the selected duration
 
 ## Available Options
 
 ### Voices
 - alloy, ash, coral, echo, fable, onyx, nova, sage, shimmer
 
-### Durations
-- 5, 10, 15, 20, 30 minutes
-
 ### Languages
-Multiple languages supported including French, English, Spanish, etc.
+Multiple languages supported including:
+- French
+- English
+- Spanish
+- German
+- Italian
+- And many more...
 
 ## Output
 
-The program generates:
-- A copy of the text content (`text.txt`)
-- A final MP3 file (`podcast_final.mp3`)
+The program generates an MP3 file (`podcast_final.mp3`) from your input text.
 
 ## Contributing
 
